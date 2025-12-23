@@ -1,6 +1,6 @@
 name: "Push Docker Image to Registry"
 description: "Push a Docker image to a container registry"
-author: "Your Name"
+author: "Vinasundar Nat"
 
 inputs:
   image-name:
