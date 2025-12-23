@@ -21,8 +21,7 @@ inputs:
     required: true
   registry-source:
     description: "source location of the registry"
-    required: false
-    default: "krypton.images"
+    required: true
   push-latest:
     description: "Push latest image to registry"
     required: false
@@ -44,30 +43,30 @@ runs:
     - name: Tag image for registry
       shell: bash
       run: |
-        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
+        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-source }}:${{ inputs.image-tag }}
 
     - name: Tag image as latest
       if: ${{ inputs.push-latest == 'true' }}
       shell: bash
       run: |
-        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:latest
+        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-source }}:latest
 
     - name: Push image to registry
       shell: bash
       run: |
-        docker push ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
+        docker push ${{ inputs.registry-source }}:${{ inputs.image-tag }}
 
     - name: Push latest image to registry
       if: ${{ inputs.push-latest == 'true' }}
       shell: bash
       run: |
-        docker push ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:latest
+        docker push ${{ inputs.registry-source }}:latest
 
     - name: Set output
       id: set-output
       shell: bash
       run: |
-        echo "image-ref=${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+        echo "image-ref=${{ inputs.registry-source }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
 
     - name: Log out from Container Registry
       shell: bash
