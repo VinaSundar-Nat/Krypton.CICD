@@ -19,6 +19,10 @@ inputs:
   registry-username:
     description: "Username for registry authentication"
     required: true
+  registry-source:
+    description: "source location of the registry"
+    required: false
+    default: "krypton.images"
 
 outputs:
   image-ref:
@@ -36,18 +40,18 @@ runs:
     - name: Tag image for registry
       shell: bash
       run: |
-        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.image-name }}:${{ inputs.image-tag }}
+        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
 
     - name: Push image to registry
       shell: bash
       run: |
-        docker push ${{ inputs.registry-url }}/${{ inputs.image-name }}:${{ inputs.image-tag }}
+        docker push ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
 
     - name: Set output
       id: set-output
       shell: bash
       run: |
-        echo "image-ref=${{ inputs.registry-url }}/${{ inputs.image-name }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+        echo "image-ref=${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
 
     - name: Log out from Container Registry
       shell: bash
