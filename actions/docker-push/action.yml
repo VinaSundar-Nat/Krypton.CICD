@@ -1,6 +1,6 @@
 name: "Push Docker Image to Registry"
 description: "Push a Docker image to a container registry"
-author: "Your Name"
+author: "Krypton - Vina Sundar"
 
 inputs:
   image-name:
@@ -23,6 +23,10 @@ inputs:
     description: "source location of the registry"
     required: false
     default: "krypton.images"
+  push-latest:
+    description: "Push latest image to registry"
+    required: false
+    default: "true"
 
 outputs:
   image-ref:
@@ -42,10 +46,22 @@ runs:
       run: |
         docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
 
+    - name: Tag image as latest
+      if: ${{ inputs.push-latest == 'true' }}
+      shell: bash
+      run: |
+        docker tag ${{ inputs.image-name }}:${{ inputs.image-tag }} ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:latest
+
     - name: Push image to registry
       shell: bash
       run: |
         docker push ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:${{ inputs.image-tag }}
+
+    - name: Push latest image to registry
+      if: ${{ inputs.push-latest == 'true' }}
+      shell: bash
+      run: |
+        docker push ${{ inputs.registry-url }}/${{ inputs.registry-username }}/${{ inputs.registry-source }}:latest
 
     - name: Set output
       id: set-output
