@@ -50,7 +50,7 @@ runs:
         echo "image-ref=${{ inputs.image-name }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.33.1
+      uses: aquasecurity/trivy-action@0.35.0
       continue-on-error: ${{ inputs.continue-on-error == 'true' }}
       with:
         image-ref: "${{ inputs.image-name }}:${{ inputs.image-tag }}"
