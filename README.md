@@ -24,6 +24,7 @@ Initialises CodeQL, builds the project, runs queries, and uploads SARIF results 
 | `query-suite` | | `security-extended` | Query suite: `security-extended` \| `security-and-quality` \| _(empty for default)_ |
 | `exclude-paths` | | `""` | Comma-separated glob patterns to exclude. e.g. `src/**/test/*, **/migrations/*` |
 | `continue-on-error` | | `false` | Continue workflow even if findings are detected |
+| `build-command` | | `""` | Custom build command instead of CodeQL autobuild. e.g. `dotnet build --configuration Release /p:GenerateOpenApi=false`. Leave empty to use autobuild. Not needed for interpreted languages (JS, Python, Ruby) |
 | `report-mode` | | `artifact` | Delivery modes — see table below |
 | `retention-days` | | `30` | Artifact retention days (used when mode includes `artifact` or `all`) |
 | `notify-email` | | `""` | Comma-separated recipient addresses (required for `email` / `all`) |
@@ -93,6 +94,21 @@ jobs:
           exclude-paths: "src/**/test/*, **/migrations/*"
 ```
 
+### Caller Example — Custom Build Command
+
+> Use `build-command` when autobuild cannot detect your build system or when you need specific build flags.
+> For C#, always pass `--no-restore` if restore has already run in a prior step.
+
+```yaml
+      - name: CodeQL Scan
+        uses: your-org/Krypton.CICD/actions/codeql-scan@main
+        with:
+          language: csharp
+          report-mode: "console"
+          build-command: "dotnet build --configuration Release --no-restore /p:GenerateOpenApi=false"
+          exclude-paths: "**/Tests/**, **/Migrations/**"
+```
+
 ### Caller Example — Artifact + Email
 
 ```yaml
@@ -101,6 +117,7 @@ jobs:
         with:
           language: csharp
           report-mode: "artifact,email"
+          build-command: "dotnet build --configuration Release --no-restore /p:GenerateOpenApi=false"
           notify-email: "security@your-org.com"
           smtp-username: ${{ secrets.SMTP_USERNAME }}
           smtp-password: ${{ secrets.SMTP_PASSWORD }}
