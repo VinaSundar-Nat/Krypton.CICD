@@ -111,7 +111,9 @@ runs:
       id: generate-config
       shell: bash
       run: |
-        CONFIG_FILE="${RUNNER_TEMP}/codeql-config-${{ inputs.language }}.yml"
+        CONFIG_DIR="${GITHUB_WORKSPACE}/.codeql"
+        mkdir -p "$CONFIG_DIR"
+        CONFIG_FILE="${CONFIG_DIR}/codeql-config-${{ inputs.language }}.yml"
 
         echo "paths-ignore:" > "$CONFIG_FILE"
 
