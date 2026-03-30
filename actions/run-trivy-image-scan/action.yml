@@ -29,6 +29,10 @@ inputs:
     description: "Ignore unfixed vulnerabilities"
     required: false
     default: "true"
+  enable-summary:
+    description: "Write a Markdown vulnerability summary to the GitHub Actions job summary page"
+    required: false
+    default: "false"
 
 outputs:
   image-ref:
@@ -59,3 +63,144 @@ runs:
         ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
         vuln-type: "os,library"
         severity: ${{ inputs.trivy-severity }}
+
+    # -----------------------------------------------------------------------
+    # Collect JSON output for the summary step — exit-code 0 so this never
+    # fails the workflow independently (the table step above owns failure).
+    # -----------------------------------------------------------------------
+    - name: Run Trivy vulnerability scanner (JSON for summary)
+      if: inputs.enable-summary == 'true'
+      uses: aquasecurity/trivy-action@0.35.0
+      with:
+        image-ref: "${{ inputs.image-name }}:${{ inputs.image-tag }}"
+        format: "json"
+        output: "${{ runner.temp }}/trivy-results.json"
+        exit-code: "0"
+        ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+        vuln-type: "os,library"
+        severity: ${{ inputs.trivy-severity }}
+
+    # -----------------------------------------------------------------------
+    # Write a rich Markdown report to $GITHUB_STEP_SUMMARY.
+    # Always runs — appears on the workflow run summary page so findings are
+    # visible without opening individual job logs.
+    # -----------------------------------------------------------------------
+    - name: Write GitHub Job Summary
+      if: always() && inputs.enable-summary == 'true'
+      shell: bash
+      run: |
+        python3 << 'PYEOF'
+        import json, os, sys
+
+        results_file = os.environ["RUNNER_TEMP"] + "/trivy-results.json"
+        summary_file = os.environ["GITHUB_STEP_SUMMARY"]
+        image_ref    = "${{ inputs.image-name }}:${{ inputs.image-tag }}"
+        repo         = "${{ github.repository }}"
+        branch       = "${{ github.ref_name }}"
+        commit       = "${{ github.sha }}"
+        actor        = "${{ github.actor }}"
+        severity_filter = "${{ inputs.trivy-severity }}"
+        run_id       = "${{ github.run_id }}"
+        run_url      = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+        severity_icon  = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵", "UNKNOWN": "⚪"}
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+
+        vulns = []
+
+        if os.path.isfile(results_file):
+          with open(results_file) as f:
+            data = json.load(f)
+          for result in data.get("Results", []):
+            target = result.get("Target", "unknown")
+            pkg_type = result.get("Type", "")
+            for v in result.get("Vulnerabilities") or []:
+              vulns.append({
+                "id":        v.get("VulnerabilityID", "?"),
+                "pkg":       v.get("PkgName", "?"),
+                "installed": v.get("InstalledVersion", "?"),
+                "fixed":     v.get("FixedVersion", "—"),
+                "severity":  v.get("Severity", "UNKNOWN").upper(),
+                "title":     v.get("Title", v.get("Description", "—")),
+                "target":    target,
+                "type":      pkg_type,
+              })
+
+        vulns.sort(key=lambda x: severity_order.get(x["severity"], 99))
+
+        counts = {}
+        for v in vulns:
+          counts[v["severity"]] = counts.get(v["severity"], 0) + 1
+
+        total      = len(vulns)
+        has_crit   = counts.get("CRITICAL", 0) > 0
+        has_high   = counts.get("HIGH", 0) > 0
+        overall_icon = "✅" if total == 0 else ("🔴" if has_crit else ("🟠" if has_high else "🟡"))
+        overall_text = "Clean — no vulnerabilities" if total == 0 else \
+                       (f"{counts.get('CRITICAL',0)} critical found" if has_crit else
+                        f"{counts.get('HIGH',0)} high found")
+
+        lines = []
+
+        # Header
+        lines.append(f"## {overall_icon} Trivy Scan Summary — `{image_ref}`\n")
+
+        # Metadata table
+        lines.append("| | |")
+        lines.append("|---|---|")
+        lines.append(f"| **Repository** | `{repo}` |")
+        lines.append(f"| **Image** | `{image_ref}` |")
+        lines.append(f"| **Severity filter** | `{severity_filter}` |")
+        lines.append(f"| **Branch** | `{branch}` |")
+        lines.append(f"| **Commit** | `{commit[:10]}` |")
+        lines.append(f"| **Triggered by** | `{actor}` |")
+        lines.append(f"| **Overall** | {overall_icon} {overall_text} |")
+        lines.append("")
+
+        # Severity breakdown
+        lines.append("### Severity Breakdown\n")
+        lines.append("| Severity | Count |")
+        lines.append("|---|---|")
+        if total == 0:
+          lines.append("| ✅ None | 0 |")
+        else:
+          for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]:
+            if sev in counts:
+              icon = severity_icon.get(sev, "⚪")
+              lines.append(f"| {icon} {sev.capitalize()} | **{counts[sev]}** |")
+        lines.append("")
+
+        # Findings table
+        if total == 0:
+          lines.append("> ✅ **No vulnerabilities detected.** Great job keeping the image secure!\n")
+        else:
+          lines.append("### Vulnerabilities\n")
+          lines.append("| Severity | CVE | Package | Installed | Fixed | Title |")
+          lines.append("|---|---|---|---|---|---|")
+          for v in vulns:
+            icon  = severity_icon.get(v["severity"], "⚪")
+            title = v["title"][:100] + "…" if len(v["title"]) > 100 else v["title"]
+            title = title.replace("|", "\\|")
+            fixed = v["fixed"] if v["fixed"] else "—"
+            lines.append(
+              f"| {icon} {v['severity'].capitalize()} "
+              f"| `{v['id']}` "
+              f"| `{v['pkg']}` "
+              f"| `{v['installed']}` "
+              f"| `{fixed}` "
+              f"| {title} |"
+            )
+          lines.append("")
+
+        # Footer
+        lines.append("---")
+        lines.append(f"🔗 [View workflow run]({run_url})")
+        lines.append("")
+
+        with open(summary_file, "a") as out:
+          out.write("\n".join(lines) + "\n")
+
+        print(f"✅ Job summary written — {total} vulnerability/vulnerabilities for {image_ref}.")
+        PYEOF
+      env:
+        RUNNER_TEMP: ${{ runner.temp }}

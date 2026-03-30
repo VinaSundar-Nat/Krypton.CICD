@@ -1,0 +1,470 @@
+name: "CodeQL Vulnerability Scan"
+description: "Initialise, build, and analyse a single CodeQL language, then deliver SARIF results via artifact, email, and/or console"
+author: "Krypton - Vina Sundar"
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+inputs:
+  language:
+    description: >
+      CodeQL language to analyse.
+      Supported: c-cpp | csharp | go | java-kotlin | javascript-typescript | python | ruby | swift
+    required: true
+
+  query-suite:
+    description: >
+      CodeQL query suite to run.
+      Options: security-extended | security-and-quality | (leave empty for default)
+    required: false
+    default: "security-extended"
+
+  exclude-paths:
+    description: >
+      Comma-separated glob patterns to exclude from CodeQL analysis.
+      e.g. 'src/**/test/*, **/migrations/*'
+    required: false
+    default: ""
+
+  continue-on-error:
+    description: "Continue workflow even if CodeQL finds vulnerabilities"
+    required: false
+    default: "false"
+
+  # -------------------------------------------------------------------------
+  # REPORT MODE — controls how scan results are delivered after analysis.
+  #
+  # Single modes:
+  #   artifact         — Upload SARIF to GitHub Actions artifacts tab
+  #   email            — Send SARIF zip via SMTP email
+  #   console          — Print findings summary to the Actions log
+  #   none             — Skip all delivery (results still appear in Security tab)
+  #
+  # Combined modes (comma-separated):
+  #   artifact,email   — Artifact + email
+  #   artifact,console — Artifact + console summary
+  #   email,console    — Email + console summary
+  #   all              — Artifact + email + console
+  # -------------------------------------------------------------------------
+  report-mode:
+    description: >
+      Comma-separated delivery modes: artifact | email | console | all | none.
+      Default is 'artifact'.
+    required: false
+    default: "console"
+
+  retention-days:
+    description: "Number of days to retain the SARIF artifact (used when report-mode includes 'artifact' or 'all')"
+    required: false
+    default: "30"
+
+  # -------------------------------------------------------------------------
+  # EMAIL settings — required when report-mode includes 'email' or 'all'.
+  # -------------------------------------------------------------------------
+  notify-email:
+    description: >
+      Comma-separated recipient email addresses for the SARIF report.
+      Required when report-mode includes 'email' or 'all'.
+    required: false
+    default: ""
+
+  smtp-server:
+    description: "SMTP server hostname (e.g. smtp.gmail.com, smtp.office365.com)"
+    required: false
+    default: "smtp.gmail.com"
+
+  smtp-port:
+    description: "SMTP port (465 for SSL, 587 for TLS/STARTTLS)"
+    required: false
+    default: "587"
+
+  smtp-username:
+    description: "SMTP login username — pass via a secret in the calling workflow"
+    required: false
+    default: ""
+
+  smtp-password:
+    description: "SMTP login password or app password — pass via a secret in the calling workflow"
+    required: false
+    default: ""
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+outputs:
+  sarif-path:
+    description: "Path to the directory containing the SARIF results"
+    value: ${{ steps.set-output.outputs.sarif-path }}
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+runs:
+  using: "composite"
+  steps:
+
+    # -----------------------------------------------------------------------
+    # 1. Generate a CodeQL config file dynamically from inputs.
+    #    Avoids the need for a checked-in codeql-config.yml in every repo.
+    # -----------------------------------------------------------------------
+    - name: Generate CodeQL config
+      id: generate-config
+      shell: bash
+      run: |
+        CONFIG_FILE="${RUNNER_TEMP}/codeql-config-${{ inputs.language }}.yml"
+
+        echo "paths-ignore:" > "$CONFIG_FILE"
+
+        # Always exclude common non-shipping paths
+        echo "  - '**/node_modules/**'" >> "$CONFIG_FILE"
+        echo "  - '**/vendor/**'"       >> "$CONFIG_FILE"
+        echo "  - '**/*.min.js'"        >> "$CONFIG_FILE"
+
+        # Append caller-supplied exclusions if provided
+        if [ -n "${{ inputs.exclude-paths }}" ]; then
+          IFS=',' read -ra PATHS <<< "${{ inputs.exclude-paths }}"
+          for p in "${PATHS[@]}"; do
+            trimmed=$(echo "$p" | xargs)   # strip surrounding whitespace
+            echo "  - '$trimmed'" >> "$CONFIG_FILE"
+          done
+        fi
+
+        echo "Generated CodeQL config:"
+        cat "$CONFIG_FILE"
+        echo "config-file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+
+    # -----------------------------------------------------------------------
+    # 2. Initialise CodeQL with the chosen language and query suite
+    # -----------------------------------------------------------------------
+    - name: Initialise CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ inputs.language }}
+        queries: ${{ inputs.query-suite }}
+        config-file: ${{ steps.generate-config.outputs.config-file }}
+
+    # -----------------------------------------------------------------------
+    # 3. Autobuild — CodeQL will try to detect and build the project.
+    #    For compiled languages (C#, Java, Go, C/C++) this builds the code.
+    #    For interpreted languages (JS, Python, Ruby) this step is a no-op.
+    #    Replace with custom build commands in the calling workflow if needed.
+    # -----------------------------------------------------------------------
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v3
+
+    # -----------------------------------------------------------------------
+    # 4. Run CodeQL queries — results always upload to the Security tab.
+    # -----------------------------------------------------------------------
+    - name: Perform CodeQL Analysis
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ inputs.language }}"
+        output: "${{ runner.temp }}/sarif-results/${{ inputs.language }}"
+        upload: true
+
+    # -----------------------------------------------------------------------
+    # 5. Expose the SARIF output path as an action output
+    # -----------------------------------------------------------------------
+    - name: Set output
+      id: set-output
+      shell: bash
+      run: |
+        echo "sarif-path=${{ runner.temp }}/sarif-results/${{ inputs.language }}" >> "$GITHUB_OUTPUT"
+
+    # -----------------------------------------------------------------------
+    # 6. CONSOLE — Print a human-readable findings summary to the Actions log.
+    #    Runs when report-mode contains 'console' or 'all'.
+    #    Pure Python — no external dependencies.
+    # -----------------------------------------------------------------------
+    - name: Print findings summary to console
+      if: >-
+        always() && (
+          contains(inputs.report-mode, 'console') ||
+          inputs.report-mode == 'all'
+        )
+      shell: bash
+      run: |
+        SARIF_DIR="${RUNNER_TEMP}/sarif-results/${{ inputs.language }}"
+
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║           CodeQL Security Scan — Findings Summary           ║"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        echo "  Repository  : ${{ github.repository }}"
+        echo "  Language    : ${{ inputs.language }}"
+        echo "  Query suite : ${{ inputs.query-suite }}"
+        echo "  Report mode : ${{ inputs.report-mode }}"
+        echo "  Branch      : ${{ github.ref_name }}"
+        echo "  Commit      : ${{ github.sha }}"
+        echo "  Triggered by: ${{ github.actor }}"
+        echo ""
+
+        python3 << 'PYEOF'
+        import json, os, glob, sys
+
+        sarif_dir   = os.environ["RUNNER_TEMP"] + "/sarif-results/" + "${{ inputs.language }}"
+        sarif_files = glob.glob(sarif_dir + "/**/*.sarif", recursive=True) + \
+                      glob.glob(sarif_dir + "/*.sarif")
+
+        if not sarif_files:
+          print("  ⚠️  No SARIF file found — scan may have produced no output.")
+          sys.exit(0)
+
+        severity_order = {"ERROR": 0, "WARNING": 1, "RECOMMENDATION": 2, "NOTE": 3}
+        severity_icon  = {"ERROR": "🔴", "WARNING": "🟡", "RECOMMENDATION": "🔵", "NOTE": "⚪"}
+
+        findings = []
+        for sarif_path in sarif_files:
+          with open(sarif_path) as f:
+            data = json.load(f)
+          for run in data.get("runs", []):
+            rules = {r["id"]: r for r in run.get("tool", {}).get("driver", {}).get("rules", [])}
+            for result in run.get("results", []):
+              rule_id  = result.get("ruleId", "unknown")
+              rule     = rules.get(rule_id, {})
+              severity = rule.get("properties", {}).get(
+                           "problem.severity",
+                           rule.get("defaultConfiguration", {}).get("level", "note")
+                         ).upper()
+              message  = result.get("message", {}).get("text", "No message")
+              for loc in result.get("locations", []):
+                pl   = loc.get("physicalLocation", {})
+                uri  = pl.get("artifactLocation", {}).get("uri", "unknown file")
+                line = pl.get("region", {}).get("startLine", "?")
+                findings.append({"severity": severity, "rule_id": rule_id,
+                                  "file": uri, "line": line, "message": message})
+
+        findings.sort(key=lambda x: severity_order.get(x["severity"], 99))
+
+        counts = {}
+        for f in findings:
+          counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+
+        total = len(findings)
+        print(f"  Total findings: {total}")
+        for sev, cnt in sorted(counts.items(), key=lambda x: severity_order.get(x[0], 99)):
+          print(f"    {severity_icon.get(sev,'⚪')}  {sev}: {cnt}")
+
+        if total == 0:
+          print()
+          print("  ✅  No findings — clean scan!")
+        else:
+          print()
+          print("  ─────────────────────────────────────────────────────────────")
+          print(f"  {'SEV':<14} {'RULE ID':<40} {'FILE : LINE'}")
+          print("  ─────────────────────────────────────────────────────────────")
+          for f in findings:
+            icon = severity_icon.get(f["severity"], "⚪")
+            loc  = f"{f['file']}:{f['line']}"
+            print(f"  {icon} {f['severity']:<12} {f['rule_id']:<40} {loc}")
+            msg = f["message"]
+            for i in range(0, len(msg), 90):
+              print(f"    {'':14} {msg[i:i+90]}")
+            print()
+
+        print("  ─────────────────────────────────────────────────────────────")
+        print("  View full results → https://github.com/${{ github.repository }}/security/code-scanning")
+        print()
+        PYEOF
+      env:
+        RUNNER_TEMP: ${{ runner.temp }}
+
+    # -----------------------------------------------------------------------
+    # 7. SUMMARY — Write a rich Markdown report to $GITHUB_STEP_SUMMARY.
+    #    Always runs regardless of report-mode — appears on the workflow run
+    #    summary page so findings are visible without opening individual logs.
+    # -----------------------------------------------------------------------
+    - name: Write GitHub Job Summary
+      if: always()
+      shell: bash
+      run: |
+        python3 << 'PYEOF'
+        import json, os, glob
+
+        sarif_dir   = os.environ["RUNNER_TEMP"] + "/sarif-results/" + "${{ inputs.language }}"
+        sarif_files = glob.glob(sarif_dir + "/**/*.sarif", recursive=True) + \
+                      glob.glob(sarif_dir + "/*.sarif")
+
+        summary_file = os.environ["GITHUB_STEP_SUMMARY"]
+        language     = "${{ inputs.language }}"
+        repo         = "${{ github.repository }}"
+        branch       = "${{ github.ref_name }}"
+        commit       = "${{ github.sha }}"
+        actor        = "${{ github.actor }}"
+        query_suite  = "${{ inputs.query-suite }}"
+        report_mode  = "${{ inputs.report-mode }}"
+        run_id       = "${{ github.run_id }}"
+        security_url = f"https://github.com/{repo}/security/code-scanning"
+        run_url      = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+        severity_icon  = {"ERROR": "🔴", "WARNING": "🟡", "RECOMMENDATION": "🔵", "NOTE": "⚪"}
+        severity_order = {"ERROR": 0, "WARNING": 1, "RECOMMENDATION": 2, "NOTE": 3}
+
+        findings = []
+        for sarif_path in sarif_files:
+          with open(sarif_path) as f:
+            data = json.load(f)
+          for run in data.get("runs", []):
+            rules = {r["id"]: r for r in run.get("tool", {}).get("driver", {}).get("rules", [])}
+            for result in run.get("results", []):
+              rule_id  = result.get("ruleId", "unknown")
+              rule     = rules.get(rule_id, {})
+              severity = rule.get("properties", {}).get(
+                           "problem.severity",
+                           rule.get("defaultConfiguration", {}).get("level", "note")
+                         ).upper()
+              message  = result.get("message", {}).get("text", "—")
+              for loc in result.get("locations", []):
+                pl   = loc.get("physicalLocation", {})
+                uri  = pl.get("artifactLocation", {}).get("uri", "unknown")
+                line = pl.get("region", {}).get("startLine", "?")
+                findings.append({"severity": severity, "rule_id": rule_id,
+                                  "file": uri, "line": line, "message": message})
+
+        findings.sort(key=lambda x: severity_order.get(x["severity"], 99))
+
+        counts       = {}
+        for f in findings:
+          counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+
+        total        = len(findings)
+        has_errors   = counts.get("ERROR", 0) > 0
+        has_warnings = counts.get("WARNING", 0) > 0
+        overall_icon = "✅" if total == 0 else ("🔴" if has_errors else "🟡")
+        overall_text = "Clean — no findings" if total == 0 else \
+                       (f"{counts.get('ERROR',0)} error(s) found" if has_errors else
+                        f"{counts.get('WARNING',0)} warning(s) found")
+
+        lines = []
+
+        # Header
+        lines.append(f"## {overall_icon} CodeQL Scan Summary — `{language}`\n")
+
+        # Metadata table
+        lines.append("| | |")
+        lines.append("|---|---|")
+        lines.append(f"| **Repository** | `{repo}` |")
+        lines.append(f"| **Language** | `{language}` |")
+        lines.append(f"| **Query suite** | `{query_suite}` |")
+        lines.append(f"| **Report mode** | `{report_mode}` |")
+        lines.append(f"| **Branch** | `{branch}` |")
+        lines.append(f"| **Commit** | `{commit[:10]}` |")
+        lines.append(f"| **Triggered by** | `{actor}` |")
+        lines.append(f"| **Overall** | {overall_icon} {overall_text} |")
+        lines.append("")
+
+        # Severity breakdown
+        lines.append("### Severity Breakdown\n")
+        lines.append("| Severity | Count |")
+        lines.append("|---|---|")
+        if total == 0:
+          lines.append("| ✅ None | 0 |")
+        else:
+          for sev in ["ERROR", "WARNING", "RECOMMENDATION", "NOTE"]:
+            if sev in counts:
+              icon = severity_icon.get(sev, "⚪")
+              lines.append(f"| {icon} {sev.capitalize()} | **{counts[sev]}** |")
+        lines.append("")
+
+        # Findings table
+        if total == 0:
+          lines.append("> ✅ **No findings detected.** Great job keeping the codebase secure!\n")
+        else:
+          lines.append("### Findings\n")
+          lines.append("| Severity | Rule ID | File | Line | Message |")
+          lines.append("|---|---|---|---|---|")
+          for f in findings:
+            icon = severity_icon.get(f["severity"], "⚪")
+            msg  = f["message"][:120] + "…" if len(f["message"]) > 120 else f["message"]
+            msg  = msg.replace("|", "\\|")
+            lines.append(
+              f"| {icon} {f['severity'].capitalize()} "
+              f"| `{f['rule_id']}` "
+              f"| `{f['file']}` "
+              f"| {f['line']} "
+              f"| {msg} |"
+            )
+          lines.append("")
+
+        # Footer links
+        lines.append("---")
+        lines.append(
+          f"🔗 [View full results in Security tab]({security_url}) &nbsp;|&nbsp; "
+          f"[View workflow run]({run_url})"
+        )
+        lines.append("")
+
+        with open(summary_file, "a") as out:
+          out.write("\n".join(lines) + "\n")
+
+        print(f"✅ Job summary written — {total} finding(s) for {language}.")
+        PYEOF
+      env:
+        RUNNER_TEMP: ${{ runner.temp }}
+
+    # -----------------------------------------------------------------------
+    # 8. ARTIFACT — Upload SARIF to GitHub Actions artifacts.
+    #    Runs when report-mode contains 'artifact' or 'all'.
+    # -----------------------------------------------------------------------
+    - name: Upload SARIF artifact
+      if: >-
+        always() && (
+          contains(inputs.report-mode, 'artifact') ||
+          inputs.report-mode == 'all'
+        )
+      uses: actions/upload-artifact@v4
+      with:
+        name: codeql-sarif-${{ inputs.language }}
+        path: "${{ runner.temp }}/sarif-results/${{ inputs.language }}"
+        retention-days: ${{ inputs.retention-days }}
+
+    # -----------------------------------------------------------------------
+    # 9. EMAIL (prep) — Zip the SARIF folder ready for attachment.
+    #    Runs when report-mode contains 'email' or 'all'.
+    # -----------------------------------------------------------------------
+    - name: Zip SARIF results for email
+      if: >-
+        always() && (
+          contains(inputs.report-mode, 'email') ||
+          inputs.report-mode == 'all'
+        )
+      shell: bash
+      run: |
+        zip -r "${{ runner.temp }}/sarif-${{ inputs.language }}.zip" \
+          "${{ runner.temp }}/sarif-results/${{ inputs.language }}"
+
+    # -----------------------------------------------------------------------
+    # 10. EMAIL — Send the zipped SARIF to the configured recipients.
+    #     Runs when report-mode contains 'email' or 'all'.
+    # -----------------------------------------------------------------------
+    - name: Email SARIF report
+      if: >-
+        always() && (
+          contains(inputs.report-mode, 'email') ||
+          inputs.report-mode == 'all'
+        )
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ inputs.smtp-server }}
+        server_port: ${{ inputs.smtp-port }}
+        username: ${{ inputs.smtp-username }}
+        password: ${{ inputs.smtp-password }}
+        to: ${{ inputs.notify-email }}
+        from: "CodeQL Security Pipeline <${{ inputs.smtp-username }}>"
+        subject: "[CodeQL] ${{ github.repository }} — ${{ inputs.language }} scan completed"
+        body: |
+          CodeQL security scan completed for ${{ github.repository }}.
+
+          Language    : ${{ inputs.language }}
+          Query suite : ${{ inputs.query-suite }}
+          Report mode : ${{ inputs.report-mode }}
+          Branch      : ${{ github.ref_name }}
+          Commit      : ${{ github.sha }}
+          Triggered by: ${{ github.actor }}
+
+          The SARIF report is attached to this email as a zip archive.
+          View live results in the GitHub Security tab:
+          https://github.com/${{ github.repository }}/security/code-scanning
+        attachments: "${{ runner.temp }}/sarif-${{ inputs.language }}.zip"
