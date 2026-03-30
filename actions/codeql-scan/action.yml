@@ -32,6 +32,21 @@ inputs:
     default: "false"
 
   # -------------------------------------------------------------------------
+  # CUSTOM BUILD — optional command to replace CodeQL autobuild.
+  # Use when autobuild cannot detect your build, or when you need specific
+  # build flags (e.g. dotnet build /p:GenerateOpenApi=false).
+  # Leave empty to use autobuild (default).
+  # For interpreted languages (JS, Python, Ruby) leave empty — no build needed.
+  # -------------------------------------------------------------------------
+  build-command:
+    description: >
+      Custom build command to run instead of CodeQL autobuild.
+      e.g. 'dotnet build --configuration Release /p:GenerateOpenApi=false'
+      Leave empty to use autobuild (default).
+    required: false
+    default: ""
+
+  # -------------------------------------------------------------------------
   # REPORT MODE — controls how scan results are delivered after analysis.
   #
   # Single modes:
@@ -146,13 +161,24 @@ runs:
         config-file: ${{ steps.generate-config.outputs.config-file }}
 
     # -----------------------------------------------------------------------
-    # 3. Autobuild — CodeQL will try to detect and build the project.
-    #    For compiled languages (C#, Java, Go, C/C++) this builds the code.
-    #    For interpreted languages (JS, Python, Ruby) this step is a no-op.
-    #    Replace with custom build commands in the calling workflow if needed.
+    # 3a. Autobuild — used when no build-command input is provided.
+    #     Automatically detects and builds compiled languages.
+    #     Is a no-op for interpreted languages (JS, Python, Ruby).
     # -----------------------------------------------------------------------
     - name: Autobuild
+      if: inputs.build-command == ''
       uses: github/codeql-action/autobuild@v3
+
+    # -----------------------------------------------------------------------
+    # 3b. Custom build — used when build-command input is provided.
+    #     Runs the caller-supplied command verbatim, e.g.:
+    #       dotnet build --configuration Release /p:GenerateOpenApi=false
+    #     Only one of 3a or 3b will execute per run.
+    # -----------------------------------------------------------------------
+    - name: Custom build
+      if: inputs.build-command != ''
+      shell: bash
+      run: ${{ inputs.build-command }}
 
     # -----------------------------------------------------------------------
     # 4. Run CodeQL queries — results always upload to the Security tab.
